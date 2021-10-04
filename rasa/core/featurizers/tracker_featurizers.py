@@ -1,6 +1,28 @@
 from pathlib import Path
 from collections import defaultdict
 from abc import abstractmethod
+from rasa.core.dialogue.stateful_turn import (
+    ExtractActionFromLastTurnAndDropLastTurn,
+    ExtractUserInformationFromLastUserTurnAndRemoveThem,
+)
+from rasa.core.dialogue.turn_sequence import (
+    KeepMaxHistory,
+    RemoveLastTurnIfUserTurn,
+    RemoveTextOrNonTextFromLastTurnIfUserTurn,
+    RemoveTurnsWithPrevActionUnlikelyIntent,
+    RemoveUserTextIfIntentFromEveryTurn,
+    TurnSequenceModifier,
+)
+from rasa.core.exceptions import InvalidTrackerFeaturizerUsageError
+
+from rasa.core.dialogue.turn import (
+    EndsWithBotTurn,
+    ExtractionFromTurnSequence,
+    HasMinLength,
+    StatefulTurn,
+    TurnSequencer,
+    TurnSubSequencer,
+)
 import jsonpickle
 import logging
 
@@ -10,22 +32,16 @@ import numpy as np
 
 from rasa.core.featurizers.single_state_featurizer import SingleStateFeaturizer
 from rasa.shared.core.domain import State, Domain
-from rasa.shared.core.events import Event, ActionExecuted, UserUttered
+from rasa.shared.core.events import ActionExecuted, UserUttered
 import rasa.shared.core.trackers
 from rasa.shared.core.trackers import DialogueStateTracker
 from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
-from rasa.shared.core.constants import (
-    USER,
-    ACTION_UNLIKELY_INTENT_NAME,
-    PREVIOUS_ACTION,
-)
+from rasa.shared.core.constants import USER
 from rasa.shared.nlu.constants import TEXT, INTENT, ENTITIES
 from rasa.utils.tensorflow.constants import LABEL_PAD_ID
 from rasa.shared.exceptions import RasaException
 import rasa.shared.utils.io
 from rasa.shared.nlu.training_data.features import Features
-from rasa.core.exceptions import InvalidTrackerFeaturizerUsageError
-from rasa.shared.nlu.constants import ACTION_NAME
 
 FEATURIZER_FILE = "featurizer.json"
 
@@ -528,161 +544,6 @@ class TrackerFeaturizer:
         )
         return None
 
-    @staticmethod
-    def _remove_action_unlikely_intent_from_states(states: List[State]) -> List[State]:
-        return [
-            state
-            for state in states
-            if not _is_prev_action_unlikely_intent_in_state(state)
-        ]
-
-    @staticmethod
-    def _remove_action_unlikely_intent_from_events(events: List[Event]) -> List[Event]:
-        return [
-            event
-            for event in events
-            if (
-                not isinstance(event, ActionExecuted)
-                or event.action_name != ACTION_UNLIKELY_INTENT_NAME
-            )
-        ]
-
-
-class FullDialogueTrackerFeaturizer(TrackerFeaturizer):
-    """Creates full dialogue training data for time distributed architectures.
-
-    Creates training data that uses each time output for prediction.
-    """
-
-    def training_states_labels_and_entities(
-        self,
-        trackers: List[DialogueStateTracker],
-        domain: Domain,
-        omit_unset_slots: bool = False,
-        ignore_action_unlikely_intent: bool = False,
-    ) -> Tuple[List[List[State]], List[List[Text]], List[List[Dict[Text, Any]]]]:
-        """Transforms trackers to states, action labels, and entity data.
-
-        Args:
-            trackers: The trackers to transform.
-            domain: The domain.
-            omit_unset_slots: If `True` do not include the initial values of slots.
-            ignore_action_unlikely_intent: Whether to remove `action_unlikely_intent`
-                from training states.
-
-        Returns:
-            Trackers as states, action labels, and entity data.
-        """
-        trackers_as_states = []
-        trackers_as_actions = []
-        trackers_as_entities = []
-
-        logger.debug(
-            "Creating states and action examples from "
-            "collected trackers (by {}({}))..."
-            "".format(type(self).__name__, type(self.state_featurizer).__name__)
-        )
-        pbar = tqdm(
-            trackers,
-            desc="Processed trackers",
-            disable=rasa.shared.utils.io.is_logging_disabled(),
-        )
-        for tracker in pbar:
-            states = self._create_states(
-                tracker, domain, omit_unset_slots=omit_unset_slots
-            )
-            events = tracker.applied_events()
-
-            if ignore_action_unlikely_intent:
-                states = self._remove_action_unlikely_intent_from_states(states)
-                events = self._remove_action_unlikely_intent_from_events(events)
-
-            delete_first_state = False
-            actions = []
-            entities = []
-            entity_data = {}
-            for event in events:
-                if isinstance(event, UserUttered):
-                    entity_data = self._entity_data(event)
-
-                if not isinstance(event, ActionExecuted):
-                    continue
-
-                if not event.unpredictable:
-                    # only actions which can be
-                    # predicted at a stories start
-                    actions.append(event.action_name or event.action_text)
-                    entities.append(entity_data)
-                else:
-                    # unpredictable actions can be
-                    # only the first in the story
-                    if delete_first_state:
-                        raise InvalidStory(
-                            f"Found two unpredictable actions in one story "
-                            f"'{tracker.sender_id}'. Check your story files."
-                        )
-                    delete_first_state = True
-
-                # reset entity_data for the the next turn
-                entity_data = {}
-
-            if delete_first_state:
-                states = states[1:]
-
-            trackers_as_states.append(states[:-1])
-            trackers_as_actions.append(actions)
-            trackers_as_entities.append(entities)
-
-        self._remove_user_text_if_intent(trackers_as_states)
-
-        return trackers_as_states, trackers_as_actions, trackers_as_entities
-
-    def prediction_states(
-        self,
-        trackers: List[DialogueStateTracker],
-        domain: Domain,
-        use_text_for_last_user_input: bool = False,
-        ignore_rule_only_turns: bool = False,
-        rule_only_data: Optional[Dict[Text, Any]] = None,
-        ignore_action_unlikely_intent: bool = False,
-    ) -> List[List[State]]:
-        """Transforms trackers to states for prediction.
-
-        Args:
-            trackers: The trackers to transform.
-            domain: The domain.
-            use_text_for_last_user_input: Indicates whether to use text or intent label
-                for featurizing last user input.
-            ignore_rule_only_turns: If True ignore dialogue turns that are present
-                only in rules.
-            rule_only_data: Slots and loops,
-                which only occur in rules but not in stories.
-            ignore_action_unlikely_intent: Whether to remove any states containing
-                `action_unlikely_intent` from prediction states.
-
-        Returns:
-            Trackers as states for prediction.
-        """
-        trackers_as_states = [
-            self._create_states(
-                tracker,
-                domain,
-                ignore_rule_only_turns=ignore_rule_only_turns,
-                rule_only_data=rule_only_data,
-            )
-            for tracker in trackers
-        ]
-
-        if ignore_action_unlikely_intent:
-            trackers_as_states = [
-                self._remove_action_unlikely_intent_from_states(states)
-                for states in trackers_as_states
-            ]
-
-        self._choose_last_user_input(trackers_as_states, use_text_for_last_user_input)
-
-        return trackers_as_states
-
 
 class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
     """Truncates the tracker history into `max_history` long sequences.
@@ -835,16 +696,54 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
         Returns:
             An iterator over example states, labels, and entity data.
         """
-        tracker_states = self._create_states(
-            tracker, domain, omit_unset_slots=omit_unset_slots
-        )
-        events = tracker.applied_events()
 
+        stateful_turns = StatefulTurn.parse(
+            tracker=tracker,
+            domain=domain,
+            omit_unset_slots=omit_unset_slots,
+            ignore_rule_only_turns=False,
+            rule_only_data=False,
+        )
+
+        # preprocessing
+        preprocessing = []
         if ignore_action_unlikely_intent:
-            tracker_states = self._remove_action_unlikely_intent_from_states(
-                tracker_states
-            )
-            events = self._remove_action_unlikely_intent_from_events(events)
+            preprocessing.append(RemoveTurnsWithPrevActionUnlikelyIntent())
+
+        modified_turns = TurnSequenceModifier.apply_all(preprocessing, stateful_turns)
+
+        # extract
+        subsequencer = TurnSubSequencer(
+            ignore_duplicates=self.remove_duplicates,
+            filters=[EndsWithBotTurn(), HasMinLength(2)],
+            postprocessing=[KeepMaxHistory(self.max_history)],
+        )
+
+        # extracted = output, input = what's left
+        extractions = [
+            ExtractUserInformationFromLastUserTurnAndRemoveThem(extract_entities=True),
+            ExtractActionFromLastTurnAndDropLastTurn(),
+        ]
+
+        # FIXME: action name - OR - text  ... and optionally do not remove from input... -> consistent with old version
+
+        for subsequence in subsequencer(modified_turns):
+
+            breakpoint()
+            # input, output = ExtractionFromTurnSequence.extract_all(extractions, subsequence)
+
+        #####
+
+        # tracker_states = self._create_states(
+        #     tracker, domain, omit_unset_slots=omit_unset_slots
+        # )
+        # events = tracker.applied_events()
+
+        # if ignore_action_unlikely_intent:
+        #     tracker_states = self._remove_action_unlikely_intent_from_states(
+        #         tracker_states
+        #     )
+        #     events = self._remove_action_unlikely_intent_from_events(events)
 
         label_index = 0
         entity_data = {}
@@ -897,30 +796,31 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
         Returns:
             Trackers as states for prediction.
         """
-        trackers_as_states = [
-            self._create_states(
-                tracker,
-                domain,
+        trackers_as_states = []
+        for tracker in trackers:
+
+            stateful_turns = StatefulTurn.parse(
+                tracker=tracker,
+                domain=domain,
+                omit_unset_slots=False,
                 ignore_rule_only_turns=ignore_rule_only_turns,
                 rule_only_data=rule_only_data,
             )
-            for tracker in trackers
-        ]
 
-        # Remove `action_unlikely_intent` from `trackers_as_states`.
-        # This must be done before state history slicing to ensure the
-        # max history of the sliced states matches training time.
-        if ignore_action_unlikely_intent:
-            trackers_as_states = [
-                self._remove_action_unlikely_intent_from_states(states)
-                for states in trackers_as_states
+            pipeline = []
+            if ignore_action_unlikely_intent:
+                pipeline.append(RemoveTurnsWithPrevActionUnlikelyIntent())
+            pipeline += [
+                RemoveTextOrNonTextFromLastTurnIfUserTurn(
+                    remove_non_text=use_text_for_last_user_input,
+                ),
+                RemoveUserTextIfIntentFromEveryTurn(),
+                KeepMaxHistory(self.max_history),
             ]
 
-        trackers_as_states = [
-            self.slice_state_history(states, self.max_history)
-            for states in trackers_as_states
-        ]
-        self._choose_last_user_input(trackers_as_states, use_text_for_last_user_input)
+            modified_turns = TurnSequenceModifier.apply_all(pipeline, stateful_turns)
+
+            trackers_as_states.append([turn.state for turn in modified_turns])
 
         return trackers_as_states
 
@@ -1167,43 +1067,36 @@ class IntentMaxHistoryTrackerFeaturizer(MaxHistoryTrackerFeaturizer):
         Returns:
             Trackers as states for prediction.
         """
-        trackers_as_states = [
-            self._create_states(
-                tracker,
-                domain,
+
+        trackers_as_states = []
+        for tracker in trackers:
+
+            stateful_turns = StatefulTurn.parse(
+                tracker=tracker,
+                domain=domain,
+                omit_unset_slots=False,
                 ignore_rule_only_turns=ignore_rule_only_turns,
                 rule_only_data=rule_only_data,
             )
-            for tracker in trackers
-        ]
 
-        # Remove `action_unlikely_intent` from `trackers_as_states`.
-        # This must be done before state history slicing to ensure the
-        # max history of the sliced states matches training time.
-        if ignore_action_unlikely_intent:
-            trackers_as_states = [
-                self._remove_action_unlikely_intent_from_states(states)
-                for states in trackers_as_states
+            pipeline = []
+            if ignore_action_unlikely_intent:
+                pipeline.append(RemoveTurnsWithPrevActionUnlikelyIntent())
+            pipeline += [
+                RemoveTextOrNonTextFromLastTurnIfUserTurn(
+                    remove_non_text=use_text_for_last_user_input
+                ),
+                RemoveUserTextIfIntentFromEveryTurn(),
+                RemoveLastTurnIfUserTurn(),
+                KeepMaxHistory(self.max_history),
             ]
 
-        self._choose_last_user_input(trackers_as_states, use_text_for_last_user_input)
-
-        # `tracker_as_states` contain a state with intent = last intent
-        # and previous action = action_listen. This state needs to be
-        # removed as it was not present during training as well because
-        # predicting the last intent is what the policies using this
-        # featurizer do. This is specifically done before state history
-        # is sliced so that the number of past states is same as `max_history`.
-        self._cleanup_last_user_state_with_action_listen(trackers_as_states)
-
-        trackers_as_states = [
-            self.slice_state_history(states, self.max_history)
-            for states in trackers_as_states
-        ]
+            modified_turns = TurnSequenceModifier.apply_all(pipeline, stateful_turns)
+            trackers_as_states.append([turn.state for turn in modified_turns])
 
         return trackers_as_states
 
 
-def _is_prev_action_unlikely_intent_in_state(state: State) -> bool:
-    prev_action_name = state.get(PREVIOUS_ACTION, {}).get(ACTION_NAME)
-    return prev_action_name == ACTION_UNLIKELY_INTENT_NAME
+# def _is_prev_action_unlikely_intent_in_state(state: State) -> bool:
+#     prev_action_name = state.get(PREVIOUS_ACTION, {}).get(ACTION_NAME)
+#     return prev_action_name == ACTION_UNLIKELY_INTENT_NAME
