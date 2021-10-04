@@ -1,28 +1,17 @@
 from __future__ import annotations
-import copy
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Text, Any, Tuple
+from typing import List, Optional, Dict, Text, Any
 
-from rasa.core.dialogue.turn import (
-    Actor,
-    ExtractionFromTurnSequence,
-    StatefulTurn,
-    Turn,
-    TurnSequenceModifier,
-)
+from rasa.core.turns.turn import Actor, DefinedTurn, Turn
 from rasa.shared.core.domain import Domain, State
 from rasa.shared.core.events import ActionExecuted, Event, UserUttered
 from rasa.shared.core.trackers import DialogueStateTracker
 from rasa.shared.core.constants import (
     ACTION_LISTEN_NAME,
-    ACTION_UNLIKELY_INTENT_NAME,
     PREVIOUS_ACTION,
-    USER,
 )
-from rasa.shared.nlu.constants import ACTION_NAME, ENTITIES, INTENT, TEXT
 
 
-class StatefulTurn(Turn):
+class StatefulTurn(DefinedTurn):
     """A wrapper for the classic 'State'.
 
     This kind of state is no 'dialogue turn'. It is a representation of the user and
@@ -129,7 +118,10 @@ class StatefulTurn(Turn):
         turns = []
         turns.append(
             StatefulTurn(
-                credentials=Turn.__credentials, actor=Actor.BOT, state={}, events=[]
+                credentials=DefinedTurn._credentials,
+                actor=Actor.BOT,
+                state={},
+                events=[],
             )
         )
 
@@ -218,7 +210,7 @@ class StatefulTurn(Turn):
 
                 # Create the turn
                 turn = StatefulTurn(
-                    credentials=Turn.__credentials,
+                    credentials=DefinedTurn._credentials,
                     actor=turn_actor,
                     state=turn_state,
                     events=turn_events,
@@ -240,113 +232,3 @@ class StatefulTurn(Turn):
         ]
         for sub_state_name in empty:
             del state[sub_state_name]
-
-
-class ExtractActionFromLastTurnAndDropLastTurn(
-    ExtractionFromTurnSequence[StatefulTurn]
-):
-    def __call__(
-        self, turns: List[StatefulTurn]
-    ) -> Tuple[List[StatefulTurn], Dict[TEXT, Any]]:
-        if len(turns) <= 2:
-            raise RuntimeError("Expected sequence of length at least 2.")
-        turns = turns[-1]
-        output = {ACTION_NAME: turns[-1].state.prev_action}
-        return turns, output
-
-
-@dataclass
-class ExtractUserInformationFromLastUserTurnAndRemoveThem(
-    ExtractionFromTurnSequence[StatefulTurn]
-):
-
-    extract_entities: bool = False
-    extract_intent: bool = False
-
-    def __call__(
-        self, turns: List[StatefulTurn]
-    ) -> Tuple[List[StatefulTurn], Dict[TEXT, Any]]:
-        if not self.extract_entities and not self.extract_intent:
-            return turns, {}
-
-        last_user_turn_idx = next(
-            (
-                idx
-                for idx in range(len(range) - 1, -1, -1)
-                if turns[idx].actor == Actor.USER
-            ),
-            None,
-        )
-
-        if not last_user_turn_idx:
-            return turns, {}
-
-        for idx in range(len(turns) - 1, last_user_turn_idx - 1, -1):
-            turn_copy = copy.deepcopy(turns[idx])
-            user_sub_state = turn_copy.state[USER]
-            if self.extract_entities:
-                intent = user_sub_state.pop(ENTITIES, None)
-            if self.extract_intent:
-                entities = user_sub_state.pop(INTENT, None)
-            turns[idx].state[USER] = turn_copy
-
-        output = {}
-        if intent:
-            output[INTENT] = intent
-        if entities:
-            output[ENTITIES] = entities
-
-        return (turns,)
-
-
-class RemoveTurnsWithPrevActionUnlikelyIntent(TurnSequenceModifier[StatefulTurn]):
-    def __call__(cls, turns: List[StatefulTurn], **kwargs: Any) -> List[StatefulTurn]:
-        return [
-            turn
-            for turn in turns
-            if turn.state.get(PREVIOUS_ACTION, {}).get(ACTION_NAME)
-            != ACTION_UNLIKELY_INTENT_NAME
-        ]
-
-
-@dataclass
-class RemoveTextOrNonTextFromLastTurnIfUserTurn(TurnSequenceModifier[StatefulTurn]):
-
-    remove_non_text: bool
-
-    def __call__(self, turns: List[StatefulTurn]) -> List[StatefulTurn]:
-        if turns and turns[-1].actor == Actor.USER:
-
-            # It is ok to manipulate the list itself, but not the turns/states.
-            last_turn_copy = copy.deepcopy(turns[-1])
-
-            if self.remove_non_text:
-                if last_turn_copy.state.get(USER, {}).get(INTENT):
-                    del last_turn_copy.state[USER][INTENT]
-                if last_turn_copy.state.get(USER, {}).get(ENTITIES):
-                    del last_turn_copy.state[USER][ENTITIES]
-            else:
-                if last_turn_copy.state.get(USER, {}).get(TEXT):
-                    del last_turn_copy.state[USER][TEXT]
-
-            turns[-1] = last_turn_copy
-        return turns
-
-
-@dataclass
-class RemoveUserTextIfIntentFromEveryTurn(TurnSequenceModifier[StatefulTurn]):
-    def __call__(self, turns: List[StatefulTurn],) -> List[StatefulTurn]:
-
-        for turn in turns:
-            user_substate = turn.state.get(USER, {})
-            if TEXT in user_substate and INTENT in user_substate:
-                del user_substate[TEXT]
-
-        return turns
-
-
-class RemoveLastTurnIfUserTurn(TurnSequenceModifier[StatefulTurn]):
-    def __call__(self, turns: List[StatefulTurn]) -> List[StatefulTurn]:
-        if turns and turns[-1].actor == Actor.USER:
-            turns = turns[:-1]
-        return turns

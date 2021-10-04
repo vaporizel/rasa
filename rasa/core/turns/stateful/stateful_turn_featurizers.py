@@ -13,23 +13,15 @@ from typing import (
 
 import scipy.sparse
 
-from rasa.core.turns.stateful_turn import StatefulTurn
+from rasa.core.turns.stateful.stateful_turn import StatefulTurn
 from rasa.core.turns.utils.attribute_featurizer import FeaturizerUsingInterpreter
 from rasa.core.turns.utils.multihot_encoder import MultiHotEncoder
-from rasa.core.turns.utils.entity_tags_encoder import EntityTagsEncoder
-from rasa.core.turns.turn_featurizer import (
-    InputPostProcessor,
-    OutputExtractor,
-    TrainableOutputExtractor,
-    TurnFeaturizer,
-)
-from rasa.nlu.constants import TOKENS_NAMES
+from rasa.core.turns.turn_featurizer import TurnFeaturizer
 from rasa.shared.core.constants import ACTIVE_LOOP, PREVIOUS_ACTION, SLOTS, USER
 from rasa.shared.core.domain import Domain
 from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter, RegexInterpreter
 from rasa.shared.nlu.constants import (
     ACTION_NAME,
-    ACTION_TEXT,
     ENTITIES,
     FEATURE_TYPE_SENTENCE,
     FEATURE_TYPE_SEQUENCE,
@@ -231,147 +223,3 @@ class BasicStatefulTurnFeaturizer(TurnFeaturizer[StatefulTurn]):
             for feature in features
             if feature.is_sparse() and feature.feature_type == FEATURE_TYPE_SEQUENCE
         ]
-
-
-class EncodeEntityFromLastUserTurn(TrainableOutputExtractor[StatefulTurn]):
-    """Encode the ... and removes corresponding entities from input encodings. """
-
-    def __init__(self, bilou_tagging: bool = False) -> None:
-        super().__init__()
-        self._bilou_tagging = bilou_tagging
-        self._entity_tags_encoder
-
-    def compatible_with(self, turn_featurizer_type: Type[TurnFeaturizer]) -> bool:
-        return turn_featurizer_type == BasicStatefulTurnFeaturizer
-
-    def train(self, domain: Domain) -> None:
-        self._entity_tags_encoder = EntityTagsEncoder(
-            domain=domain, bilou_tagging=self.bilou_tagging,
-        )
-        self._trained = True
-
-    def extract(
-        self,
-        turns: List[StatefulTurn],
-        turns_as_inputs: List[Dict[Text, Features]],
-        interpreter: NaturalLanguageInterpreter,
-        training: bool = True,
-    ) -> Tuple[List[Dict[Text, Features]], Union]:
-
-        self.raise_if_not_trained()
-
-        pass
-
-        last_user_turn = ...
-
-        # NOTE: cannot reuse encoding from featurizer,...
-
-    def encode_entities(
-        self, turn: StatefulTurn, interpreter: NaturalLanguageInterpreter
-    ) -> List[Features]:
-
-        # Don't bother encoding anyting if there are less than 2 entity tags,
-        # because we won't train any entity extactor anyway.
-        if self._entity_tags_encoder.entity_tag_spec.num_tags < 2:
-            return {}
-
-        if not USER in turn.state:
-            return []
-
-        # # FIXME: move this to postprocessing ->> if TEXT is removed then we also remove ENTITIES from the output.
-        # # train stories support both text and intent,
-        # # but if intent is present, the text is ignored
-        # if INTENT in turn.state[USER]:
-        #     return {}
-
-        entities = turn.state[USER].get(ENTITIES, {})
-
-        if not entities:
-            return []
-
-        text = turn.state[USER][TEXT]
-        message = interpreter.featurize_message(Message(data={TEXT: text}))
-        text_tokens = message.get(TOKENS_NAMES[TEXT])
-
-        return self._entity_tags_encoder.encode(
-            text_tokens=text_tokens, entities=entities
-        )
-
-    def encode_all(self, domain: Domain):
-        raise NotImplementedError()
-
-
-class ExtractIntentFromLastUserTurn(OutputExtractor[StatefulTurn]):
-    def compatible_with(self, turn_featurizer_type: Type[TurnFeaturizer]) -> bool:
-        return turn_featurizer_type == BasicStatefulTurnFeaturizer
-
-    def extract(
-        self,
-        turns: List[StatefulTurn],
-        turns_as_inputs: List[Dict[Text, Features]],
-        interpreter: NaturalLanguageInterpreter,
-        training: bool = True,
-    ) -> Tuple[List[Dict[Text, Features]], Union]:
-
-        # NOTE: since it's looking for last user state this alway sworks
-        pass
-
-        last_user_turn = ...
-
-        # NOTE: CAN reuse encoding from featurizer,... just pop from last user turn
-
-    def encode_all(
-        self, domain: Domain, interpreter: NaturalLanguageInterpreter
-    ) -> List[Dict[Text, List[Features]]]:
-        """Encodes all relevant labels from the domain using the given interpreter.
-
-        Args:
-            domain: The domain that contains the labels.
-            interpreter: The interpreter used to encode the labels.
-
-        Returns:
-            A list of encoded labels.
-        """
-        return [self._encode_intent(intent, interpreter) for intent in domain.intents]
-
-
-class ExtractActionFromLastTurn(OutputExtractor[StatefulTurn]):
-    def compatible_with(self, turn_featurizer_type: Type[TurnFeaturizer]) -> bool:
-        return turn_featurizer_type == BasicStatefulTurnFeaturizer
-
-    def extract(
-        self,
-        turns: List[StatefulTurn],
-        turns_as_inputs: List[Dict[Text, Features]],
-        interpreter: NaturalLanguageInterpreter,
-        training: bool = True,
-    ) -> Tuple[List[Dict[Text, Features]], Union]:
-        if not training:
-            return turns_as_inputs, {}
-        pass
-
-        # TODO: just pop from last turn..
-
-    def encode_all_labels(
-        self, domain: Domain, interpreter: NaturalLanguageInterpreter,
-    ) -> List[Dict[Text, List[Features]]]:
-        """Encode all action from the domain.
-        Args:
-            domain: The domain that contains the actions.
-            precomputations: Contains precomputed features and attributes.
-        Returns:
-            A list of encoded actions.
-        """
-        return [
-            self._encode_action(action, interpreter)
-            for action in domain.action_names_or_texts
-        ]
-
-
-# FIXME: apply to state and featurization... ?
-class DropTextIfIntentDuringPredictionTime(InputPostProcessor):
-    def __call__(self, turns_as_inputs: List[Dict[Text, Features]], training: bool):
-        if training:
-            return turns_as_inputs
-
-        # TODO:

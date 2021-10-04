@@ -1,24 +1,17 @@
 from __future__ import annotations
-from abc import abstractmethod, ABC
+from abc import abstractmethod
 from enum import Enum
 import logging
-from dataclasses import dataclass
 from typing import (
     Any,
-    Dict,
-    Iterator,
-    Set,
-    Text,
-    Tuple,
-    TypeVar,
-    Generic,
-    List,
     Optional,
+    Text,
+    List,
 )
 
 import rasa.shared.core.constants
 from rasa.shared.core.domain import Domain
-from rasa.shared.core.events import ActionExecuted, Event, UserUttered
+from rasa.shared.core.events import Event
 from rasa.shared.core.trackers import DialogueStateTracker
 
 logger = logging.getLogger(__name__)
@@ -57,11 +50,27 @@ class Turn:
     def __hash__(self) -> int:
         return hash(f"{self.actor}{self.events}")
 
+    @staticmethod
+    def get_index_of_last_user_turn(turns: List[Turn]) -> Optional[int]:
+        """Returns the index of the last user turn, or None if there is no such turn.
+
+        Returns:
+            the index of the last user turn, or None if there is no such turn
+        """
+        return next(
+            [
+                idx
+                for idx in range(len(turns) - 1, -1, -1)
+                if turns[idx].actor == Actor.USER
+            ],
+            None,
+        )
+
 
 class DefinedTurn(Turn):
     """A turn that has a defined meaning and can only be created from a tracker."""
 
-    __credentials = object()
+    _credentials = object()
 
     def __init__(self, credentials: object, actor: Actor, events: List[Event]):
         """Private constructor for stateful turns. Use `parse` to generate these turns.
@@ -71,7 +80,7 @@ class DefinedTurn(Turn):
             actor: describes whose turn it is (user or bot)
             events: a sequence of events belonging to the `actor`
         """
-        if credentials != DefinedTurn.__credentials:
+        if credentials != DefinedTurn._credentials:
             raise RuntimeError(
                 f"{self.__class__.__name__} should only be created via `parse`."
             )

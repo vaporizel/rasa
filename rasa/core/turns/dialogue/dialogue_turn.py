@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import List, Any
 
 
-from rasa.core.dialogue.turn import Actor, DefinedTurn
+from rasa.core.turns.turn import Actor, DefinedTurn
 from rasa.shared.core.domain import Domain
 from rasa.shared.core.events import ActionExecuted, UserUttered
 from rasa.shared.core.trackers import DialogueStateTracker
@@ -38,20 +38,20 @@ class DialogueTurn(DefinedTurn):
             if isinstance(current_event, UserUttered):
                 if bot_turn_events:
                     bot_turn = DialogueTurn(
-                        DefinedTurn.__credentials,
+                        DefinedTurn._credentials,
                         actor=Actor.BOT,
                         events=bot_turn_events,
                     )
                     turns.append(bot_turn)
                     bot_turn_events = []
                 user_turn = DialogueTurn(
-                    DefinedTurn.__credentials, actor=Actor.USER, events=[current_event]
+                    DefinedTurn._credentials, actor=Actor.USER, events=[current_event]
                 )
                 turns.append(user_turn)
             elif isinstance(current_event, ActionExecuted):
                 bot_turn_events.append(current_event)
                 bot_turn = DialogueTurn(
-                    DefinedTurn.__credentials, actor=Actor.BOT, events=bot_turn_events
+                    DefinedTurn._credentials, actor=Actor.BOT, events=bot_turn_events
                 )
                 turns.append(bot_turn)
                 bot_turn_events = []
