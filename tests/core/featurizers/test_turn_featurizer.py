@@ -1,12 +1,10 @@
-import random
-import copy
-from rasa.shared.nlu.constants import ACTION_NAME
-
 import numpy as np
 
-from rasa.core.featurizers.turn_featurizer import StatefulTurnFeaturizer
+from rasa.core.turns.stateful.stateful_turn_featurizers import (
+    BasicStatefulTurnFeaturizer,
+)
 from rasa.shared.core.domain import Domain
-from rasa.core.featurizers.extra_featurizers import MultiHotEncoder
+from rasa.shared.nlu.constants import ACTION_NAME
 
 
 def test_convert_action_labels_to_ids(domain: Domain):
@@ -15,7 +13,7 @@ def test_convert_action_labels_to_ids(domain: Domain):
         ["utter_greet", "utter_default", "utter_goodbye"],
     ]
 
-    turn_featurizer = StatefulTurnFeaturizer()
+    turn_featurizer = BasicStatefulTurnFeaturizer()
     turn_featurizer.train(domain=domain)
 
     # TODO: replace this

@@ -1,29 +1,20 @@
 from __future__ import annotations
+from abc import ABC
 from typing import (
+    Any,
     List,
     Optional,
     Dict,
     Text,
-    Text,
     Tuple,
+    TypeVar,
 )
-
-import numpy as np
 
 from rasa.core.turns.turn import Turn
 from rasa.core.turns.stateful.stateful_turn import StatefulTurn
-from rasa.core.turns.utils.attribute_featurizer import FeaturizerUsingInterpreter
-from rasa.core.turns.utils.multihot_encoder import MultiHotEncoder
-from rasa.core.turns.utils.entity_tags_encoder import EntityTagsEncoder
-from rasa.core.turns.utils.trainable import Trainable
-from rasa.core.turns.dataset_from_turns import (
-    FeaturizedLabelsFromTurns,
-    LabelsFromTurns,
-)
-from rasa.nlu.constants import TOKENS_NAMES
+from rasa.core.turns.to_dataset.dataset import LabelFromTurnsExtractor
 from rasa.shared.core.constants import PREVIOUS_ACTION, USER
 from rasa.shared.core.domain import Domain
-from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
 from rasa.shared.nlu.constants import (
     ACTION_NAME,
     ACTION_TEXT,
@@ -31,212 +22,139 @@ from rasa.shared.nlu.constants import (
     INTENT,
     TEXT,
 )
-from rasa.shared.nlu.training_data.features import Features
-from rasa.shared.nlu.training_data.message import Message
 
 
 ACTION_NAME_OR_TEXT = "action_name_or_text"
 
 
-class FeaturizeEntityFromLastUserTurnViaEntityTagEncoder(
-    FeaturizedLabelsFromTurns[StatefulTurn], Trainable
-):
-    """Extracts and encodes the entity information from the last user state.
+T = TypeVar("T")
 
-    Entity information will be removed from the user sub-state of the last user turn
+
+class ExtractAttributeFromLastUserTurn(
+    LabelFromTurnsExtractor[StatefulTurn, Tuple[Optional[Text], Optional[T]]], ABC
+):
+    """Extracts an attribute from the user-substate of the last user turn.
+
+    The information will be removed from the user sub-state of the last user turn
     and of all following turns.
-    However, a featurization of the entities is only computed during training.
+
+    Along with the attribute, the user text will be returned. However, the user text
+    will not be removed from any substate.
     """
 
-    def __init__(self, bilou_tagging: bool = False) -> None:
-        super().__init__()
-        self._bilou_tagging = bilou_tagging
-        self._entity_tags_encoder
+    def __init__(self, attribute: Text) -> None:
+        self._attribute = attribute
 
-    def train(self, domain: Domain) -> None:
-        self._entity_tags_encoder = EntityTagsEncoder(
-            domain=domain, bilou_tagging=self.bilou_tagging,
-        )
-        self._trained = True
-
-    def extract_and_featurize(
-        self,
-        turns: List[StatefulTurn],
-        training: bool = True,
-        interpreter: Optional[NaturalLanguageInterpreter] = None,
-    ) -> Tuple[List[StatefulTurn], Optional[Dict[Text, List[Features]]]]:
-        self.raise_if_not_trained()
-        if interpreter is None:
-            raise RuntimeError("Needs interpreter")
-
+    def __call__(
+        self, turns: List[StatefulTurn], training: bool = True,
+    ) -> Tuple[List[Turn], Tuple[Optional[Text], Optional[T]]]:
         last_user_turn_idx = Turn.get_index_of_last_user_turn(turns)
-        if last_user_turn_idx is None:
-            raise ValueError(
-                "There is no user turn from which we could extract entity labels."
-            )
-
-        # encode the entities
-        encoded_entities = None
         if training:
             last_user_turn = turns[last_user_turn_idx]
-            encoded_entities = self._encode_entities(
-                last_user_turn, interpreter=interpreter
+            state = last_user_turn.state.get(USER, {})
+            raw_info = (
+                last_user_turn.state.get(TEXT, None),
+                state.get(self._attribute, None),
             )
+            # it is the last user turn, but the states in all subsequent bot turns
+            # contain information about the last user turn
+            for idx in range(last_user_turn_idx, len(turns)):
+                turns[idx].state.get(USER, {}).pop(self._attribute, None)
 
-        # it is the last user turn, but the states in all subsequent bot turns
-        # contain information about the last user turn
-        for idx in range(last_user_turn_idx, len(turns)):
-            turns[idx].state.get(USER, {}).pop(ENTITIES, None)
+        else:
+            raw_info = (None, None)
+        return turns, raw_info
 
-        return turns, encoded_entities
-
-    def _encode_entities(
-        self, turn: StatefulTurn, interpreter: NaturalLanguageInterpreter,
-    ) -> Dict[Text, List[Features]]:
-
-        # Don't bother encoding anyting if there are less than 2 entity tags,
-        # because we won't train any entity extactor anyway.
-        if self._entity_tags_encoder.entity_tag_spec.num_tags < 2:
-            return {}
-
-        if not USER in turn.state:
-            return []
-
-        # # FIXME: move this to postprocessing ->> if TEXT is removed then we also remove ENTITIES from the output.
-        # # train stories support both text and intent,
-        # # but if intent is present, the text is ignored
-        # if INTENT in turn.state[USER]:
-        #     return {}
-
-        entities = turn.state[USER].get(ENTITIES, {})
-
-        if not entities:
-            return []
-
-        text = turn.state[USER][TEXT]
-        message = interpreter.featurize_message(Message(data={TEXT: text}))
-        text_tokens = message.get(TOKENS_NAMES[TEXT])
-
-        return self._entity_tags_encoder.encode(
-            text_tokens=text_tokens, entities=entities
-        )
-
-    def encode_all(self, domain: Domain, interpreter: NaturalLanguageInterpreter):
+    def from_domain(self, domain: Domain,) -> List[Tuple[Optional[Text], T]]:
         raise NotImplementedError()
 
 
-class FeaturizeIntentFromLastUserTurnViaInterpreter(LabelsFromTurns[StatefulTurn]):
-    """Extracts and encodes the intent information from the last user state.
+class ExtractIntentFromLastUserTurn(LabelFromTurnsExtractor[StatefulTurn, Text]):
+    """Extract the intent from the last user turn.
 
-    Removes intent information from the user sub-state of the last user turn
-    and of all following turns, during training as well as during inference.
-    However, a featurization of the intent is only computed during training.
+    During training, the intent will be removed from the user sub-state of the last
+    user turn and of all following turns.
+    During inference, nothing will be removed.
     """
 
-    def extract(
-        self,
-        turns: List[StatefulTurn],
-        interpreter: Optional[NaturalLanguageInterpreter] = None,
-        training: bool = True,
-    ) -> Tuple[List[StatefulTurn], Optional[Dict[Text, List[Features]]]]:
-        self.raise_if_not_trained()
-        last_user_turn_idx = Turn.get_index_of_last_user_turn(turns)
-        if last_user_turn_idx is None:
-            raise ValueError(
-                "There is no user turn from which we could extract entity labels."
-            )
+    def __init__(self) -> None:
+        self.extractor = ExtractAttributeFromLastUserTurn(attribute=INTENT)
 
-        # encode the intent
-        encoded_intent = None
-        if training:
-            last_user_turn = turns[last_user_turn_idx]
-            encoded_intent = self._encode_intent(last_user_turn)
+    def __call__(
+        self, turns: List[StatefulTurn], training: bool = True,
+    ) -> Tuple[List[Turn], Tuple[Optional[Text], T]]:
+        turns, (_, intent) = self.extractor(turns, training=training)
+        if training and intent is None:
+            raise RuntimeError("Could not extract an intent...")
+        return turns, intent
 
-        # it is the last user turn, but the states in all subsequent bot turns
-        # contain information about the last user turn
-        for idx in range(last_user_turn_idx, len(turns)):
-            turns[idx].state.get(USER, {}).pop(INTENT, None)
-
-        return turns, encoded_intent
-
-    def _encode_intent(
-        self,
-        turn: StatefulTurn,
-        interpreter: Optional[NaturalLanguageInterpreter] = None,
-    ) -> Dict[Text, List[Features]]:
-        intent = turn.state.get(USER, {}).get(INTENT, None)
-        if not intent:
-            return {}
-        return FeaturizerUsingInterpreter.featurize(
-            message_data={INTENT: intent}, interpreter=interpreter
-        )
-
-    def encode_all(
-        self, domain: Domain, interpreter: NaturalLanguageInterpreter
-    ) -> List[Dict[Text, List[Features]]]:
-        return [self._encode_intent(intent, interpreter) for intent in domain.intents]
+    def from_domain(self, domain: Domain,) -> List[Text]:
+        return domain.intents
 
 
-class ExtractActionFromLastTurn(LabelsFromTurns[StatefulTurn]):
+class ExtractEntitiesFromLastUserTurn(
+    LabelFromTurnsExtractor[StatefulTurn, Optional[Dict[Text, Any]]]
+):
+    """Extract the entities from the last user turn.
+
+    During training, the entities will be removed from the user sub-state of the
+    last user turn and of all following turns.
+    During inference, nothing will be removed.
+    """
+
+    def __init__(self) -> None:
+        self.extractor = ExtractAttributeFromLastUserTurn(attribute=ENTITIES)
+
+    def __call__(
+        self, turns: List[StatefulTurn], training: bool = True,
+    ) -> Tuple[List[Turn], Optional[Dict[Text, Any]]]:
+        turns, (_, entities) = self.extractor(turns, training=training)
+        return turns, entities
+
+
+class ExtractEntitiesAndTextFromLastUserTurn(
+    LabelFromTurnsExtractor[StatefulTurn, Tuple[Text, Dict[Text, Any]]]
+):
+    """Extract the entities from the last user turn, and also return the text.
+
+    During training, the entities will be removed from the user sub-state of the last
+    user turn and of all following turns. The text will *not* be removed from
+    any sub-state.
+    During inference, nothing will be removed.
+    """
+
+    def __init__(self) -> None:
+        self.extractor = ExtractAttributeFromLastUserTurn(attribute=INTENT)
+
+    def __call__(
+        self, turns: List[StatefulTurn], training: bool = True,
+    ) -> Tuple[List[Turn], Tuple[Optional[Text], T]]:
+        return self.extractor(turns, training=training)
+
+
+class ExtractActionFromLastTurn(LabelFromTurnsExtractor[StatefulTurn, Text]):
     """Extracts the action from the last turn and removes that turn.
 
-    The last turn will be removed from the given sequence only during training.
+    During training, the last turn will be removed from the given sequence.
     During inference, the turns remain unchanged.
     """
 
-    def extract(
+    def __call__(
         self, turns: List[StatefulTurn], training: bool = True,
-    ) -> Tuple[List[Turn], Dict[Text, Text]]:
+    ) -> Tuple[List[StatefulTurn], Text]:
         if training:
             prev_action = turns[-1].state.get(PREVIOUS_ACTION, {})
             # we prefer the action name but will use action text, if there is no name
             action = prev_action.get(ACTION_NAME, None)
             if not action:
                 action = prev_action.get(ACTION_TEXT, None)
-            labels = {ACTION_NAME_OR_TEXT: action}
+            if not action:
+                raise RuntimeError("There must be an action we can extract....")
             # remove the whole turn
-            turns = turns[-1]
+            turns = turns[:-1]
         else:
-            labels = {}
-        return turns, labels
+            action = ""
+        return turns, action
 
-    def extract_all(self, domain: Domain,) -> Dict[Text, List[Text]]:
-        return {ACTION_NAME_OR_TEXT: domain.action_names_or_texts}
-
-
-class IndexFeaturizerFromExtractor(FeaturizedLabelsFromTurns[StatefulTurn], Trainable):
-    def __init__(self, extractor=LabelsFromTurns[StatefulTurn]):
-        self._extractor = extractor
-
-    def train(self, domain: Domain) -> None:
-        self._multihot_encoders = {
-            key: MultiHotEncoder(values)
-            for key, values in self._extractor.extract_all(domain=domain).items()
-        }
-        self._trained = True
-
-    def extract_and_featurize(
-        self,
-        turns: List[StatefulTurn],
-        training: bool = True,
-        interpreter: Optional[NaturalLanguageInterpreter] = None,
-    ) -> Tuple[List[Turn], Dict[Text, np.ndarray]]:
-        self.raise_if_not_trained()
-        extracted = self._extractor.extract(turns, training=training)
-        if extracted:
-            # Note that we only use an index array here to be consistent with the types
-            # (and because we need to wrap it later on anyway).
-            extracted = {
-                key: self._multihot_encoders[key].encode_as_index_array([value])
-                for key, value in extracted
-            }
-        return turns, extracted
-
-    def featurize_all(
-        self, domain: Domain, interpreter: Optional[NaturalLanguageInterpreter] = None,
-    ) -> Dict[Text, Dict[Text, List[np.ndarray]]]:
-        self.raise_if_not_trained()
-        return {
-            key: {value: self._multihot_encoders[key].encode_as_index_array([value])}
-            for key, value in self._extractor.extract_all(domain=domain).items()
-        }
+    def from_domain(self, domain: Domain,) -> List[Text]:
+        return domain.action_names_or_texts

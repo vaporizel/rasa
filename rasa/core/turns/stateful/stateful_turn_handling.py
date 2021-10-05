@@ -1,11 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import List
 
 from rasa.core.turns.turn import Actor
-from rasa.core.turns.turn_sequence import TurnSequenceModifier
 from rasa.core.turns.stateful.stateful_turn import StatefulTurn
-from rasa.core.turns.turn_featurizer import TurnFeatures
+from rasa.core.turns.to_dataset.dataset import TurnSequenceModifier
 from rasa.shared.core.constants import (
     ACTION_UNLIKELY_INTENT_NAME,
     PREVIOUS_ACTION,
@@ -14,12 +13,17 @@ from rasa.shared.core.constants import (
 from rasa.shared.nlu.constants import ACTION_NAME, ENTITIES, INTENT, TEXT
 
 
+@dataclass
 class RemoveTurnsWithPrevActionUnlikelyIntent(TurnSequenceModifier[StatefulTurn]):
     """Remove turns where the previous action substate is an action unlikely intent."""
 
+    switched_on: bool = True
+
     def __call__(
         self, turns: List[StatefulTurn], training: bool,
-    ) -> Tuple[List[StatefulTurn], Optional[List[TurnFeatures]]]:
+    ) -> List[StatefulTurn]:
+        if not self.switched_on:
+            return turns
         return [
             turn
             for turn in turns
@@ -40,7 +44,7 @@ class DuringPredictionIfLastTurnWasUserTurnKeepEitherTextOrNonText(
     are targets? (in that case, the new label extractors would take care of this)
     """
 
-    keep_text: bool
+    keep_text: bool = True
 
     def __call__(
         self, turns: List[StatefulTurn], training: bool,

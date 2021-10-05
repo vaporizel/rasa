@@ -58,11 +58,11 @@ class Turn:
             the index of the last user turn, or None if there is no such turn
         """
         return next(
-            [
+            (
                 idx
                 for idx in range(len(turns) - 1, -1, -1)
                 if turns[idx].actor == Actor.USER
-            ],
+            ),
             None,
         )
 

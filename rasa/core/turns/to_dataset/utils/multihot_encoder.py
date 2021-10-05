@@ -1,4 +1,4 @@
-from typing import List, Dict, Text, Text
+from typing import List, Dict, Text
 
 import numpy as np
 import scipy.sparse
@@ -23,24 +23,19 @@ class MultiHotEncoder:
         }
 
     def encode_as_sparse_sentence_feature(
-        self, dimension_names_to_values: Dict[Text, int],
+        self, dimension_names_to_values: Dict[Text, int], attribute: Text, origin: Text,
     ) -> Features:
         dim = len(self.dimension_name_to_index)
-        row = np.zeros(dim, dtype=int)
-        col = np.zeros(dim, dtype=int)
-        data = np.zeros(dim, dtype=float)
+        col = []
+        data = []
         for dim_name, value in dimension_names_to_values.items():
             index = self.dimension_name_to_index.get(dim_name)
             if index:
                 col.append(index)
                 data.append(value)
-        features = scipy.sparse.coo_matrix((data, (row, col)))
-        return Features(
-            features,
-            FEATURE_TYPE_SENTENCE,
-            self.attribute,
-            origin=self.__class__.__name__,
-        )
+        row = [0] * len(data)
+        features = scipy.sparse.coo_matrix((data, (row, col)), shape=[1, dim])
+        return Features(features, FEATURE_TYPE_SENTENCE, attribute, origin=origin,)
 
     def encode_as_index(self, dimension_name: Text,) -> int:
         """

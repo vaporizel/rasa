@@ -1,5 +1,5 @@
 from rasa.shared.core.domain import SubState
-from typing import Any, List, Optional, Dict, Set, Text, Text
+from typing import List, Optional, Dict, Set, Text
 
 
 from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
@@ -7,9 +7,10 @@ from rasa.shared.nlu.training_data.features import Features
 from rasa.shared.nlu.training_data.message import Message
 
 
-class FeaturizerUsingInterpreter:
-    @staticmethod
-    def featurize(
+class FeatureLookup:
+    @classmethod
+    def lookup_features(
+        cls,
         message_data: SubState,
         interpreter: NaturalLanguageInterpreter,
         exclude_from_results: Optional[Set[Text]] = None,
@@ -33,14 +34,12 @@ class FeaturizerUsingInterpreter:
             for attribute in message_data.keys()
             if attribute not in exclude_from_results
         )
-        output = FeaturizerUsingInterpreter._get_features_from_parsed_message(
-            parsed_message, attributes
-        )
+        output = cls._get_features_from_parsed_message(parsed_message, attributes)
         return output
 
-    @staticmethod
+    @classmethod
     def _get_features_from_parsed_message(
-        message: Message, attributes: Set[Text]
+        cls, message: Message, attributes: Set[Text]
     ) -> Dict[Text, List[Features]]:
         """Collects and combine all features for the specified attributes.
 

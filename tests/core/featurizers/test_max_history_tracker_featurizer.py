@@ -50,7 +50,7 @@ def compare_featurized_states(
 
 ### FEATURIZE TRACKERS:  featurization during training
 
-"""
+
 @pytest.mark.parametrize("max_history", [None, 2])
 def test_featurize_trackers_with_max_history_tracker_featurizer(
     moodbot_tracker: DialogueStateTracker,
@@ -419,9 +419,9 @@ def test_deduplicate_featurize_trackers_with_max_history_tracker_featurizer(
 
     # moodbot doesn't contain e2e entities
     assert not any([any(turn_tags) for turn_tags in entity_tags])
-"""
 
-### CREATE STATE FEATURES: featurization during inference
+
+###  CREATE STATE FEATURES: featurization during inference
 
 """
 @pytest.mark.parametrize("max_history", [None, 2])

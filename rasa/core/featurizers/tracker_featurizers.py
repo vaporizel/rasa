@@ -1,44 +1,47 @@
-from pathlib import Path
-from collections import defaultdict
-from abc import abstractmethod
-import jsonpickle
 import logging
-
-from tqdm import tqdm
-from typing import Tuple, List, Optional, Dict, Text, Union, Any, Iterator, Set
+from typing import Tuple, List, Optional, Dict, Text, Any
 import numpy as np
-from rasa.core.exceptions import InvalidTrackerFeaturizerUsageError
-from rasa.core.turns.dataset_from_turns import DatasetFromTurns
+
 
 from rasa.core.turns.stateful.stateful_turn import StatefulTurn
+from rasa.core.turns.stateful.stateful_turn_featurizers import (
+    BasicStatefulTurnFeaturizer,
+)
 from rasa.core.turns.stateful.stateful_turn_labels import (
     ExtractActionFromLastTurn,
-    FeaturizeEntityFromLastUserTurnViaEntityTagEncoder,
-    FeaturizeIntentFromLastUserTurnViaInterpreter,
+    ExtractEntitiesAndTextFromLastUserTurn,
+    ExtractIntentFromLastUserTurn,
 )
-from rasa.core.turns.stateful.stateful_turn_sequence import (
+from rasa.core.turns.stateful.stateful_turn_handling import (
     RemoveTurnsWithPrevActionUnlikelyIntent,
     RemoveUserTextIfIntentFromEveryTurn,
     DuringPredictionIfLastTurnWasUserTurnKeepEitherTextOrNonText,
 )
-from rasa.core.turns.turn_sequence import (
+from rasa.core.turns.to_dataset.basic_encoders import (
+    ApplyEntityTagsEncoder,
+    IndexerFromLabelExtractor,
+    LabelFeaturizerViaLookup,
+)
+from rasa.core.turns.to_dataset.basic_turn_handling import (
     KeepMaxHistory,
     HasMinLength,
     EndsWithBotTurn,
-    TurnSequenceModifier,
 )
 from rasa.core.featurizers.single_state_featurizer import SingleStateFeaturizer
+from rasa.core.turns.to_dataset.dataset import (
+    DatasetFromTurns,
+    FeaturizedDatasetFromTurns,
+    LabelFeaturizationPipeline,
+)
 from rasa.shared.core.domain import State, Domain
-from rasa.shared.core.events import ActionExecuted, UserUttered
-import rasa.shared.core.trackers
 from rasa.shared.core.trackers import DialogueStateTracker
 from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
-from rasa.shared.core.constants import USER
-from rasa.shared.nlu.constants import TEXT, INTENT, ENTITIES
-from rasa.utils.tensorflow.constants import LABEL_PAD_ID
+from rasa.shared.nlu.constants import ACTION_NAME, INTENT, ENTITIES
 from rasa.shared.exceptions import RasaException
-import rasa.shared.utils.io
 from rasa.shared.nlu.training_data.features import Features
+
+
+# from rasa.utils.tensorflow.constants import LABEL_PAD_ID
 
 FEATURIZER_FILE = "featurizer.json"
 
@@ -164,6 +167,34 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
         self.max_history = max_history
         self.remove_duplicates = remove_duplicates
 
+        # (2.2) un-featurized dataset generators - for prediction
+
+        self._ignore_action_unlikely = RemoveTurnsWithPrevActionUnlikelyIntent()
+        filters = [EndsWithBotTurn(), HasMinLength(2)]
+        self._last_turn_handling = (
+            DuringPredictionIfLastTurnWasUserTurnKeepEitherTextOrNonText()
+        )
+
+        modifiers = [
+            self._ignore_action_unlikely,
+            KeepMaxHistory(max_history),
+            self._last_turn_handling,
+            RemoveUserTextIfIntentFromEveryTurn(),
+        ]
+        label_extractors = []
+        # label_extractors = [
+        #     (INTENT, ExtractIntentFromLastUserTurn()),
+        #     (ENTITIES, ExtractEntitiesFromLastUserTurn()),
+        #     (ACTION_NAME, ExtractActionFromLastTurn()),
+        # ]
+        self._raw_inference = DatasetFromTurns(
+            initial_validations=filters,
+            ignore_duplicates=remove_duplicates,
+            modifiers=modifiers,
+            final_validations=filters,
+            label_extractors=label_extractors,
+        )
+
     def prepare_for_featurization(
         self,
         domain: Domain,
@@ -172,10 +203,57 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
     ) -> None:
         """
 
-        training
+        preparation for create_state_features (inference) and
+        featurize_trackers (training) - used by ML policies
 
         """
-        pass
+
+        # (1.1) featurized dataset generators - for training
+
+        self._ignore_action_unlikely = RemoveTurnsWithPrevActionUnlikelyIntent()
+        filters = [EndsWithBotTurn(), HasMinLength(2)]
+
+        modifiers = [
+            self._ignore_action_unlikely,
+            KeepMaxHistory(self.max_history),
+        ]
+        turn_featurizer = BasicStatefulTurnFeaturizer()
+        label_handling = [
+            (
+                ACTION_NAME,
+                LabelFeaturizationPipeline(
+                    extractor=ExtractActionFromLastTurn(),
+                    featurizer=None,
+                    indexer=IndexerFromLabelExtractor(),
+                ),
+            ),
+            (
+                INTENT,
+                LabelFeaturizationPipeline(
+                    extractor=ExtractIntentFromLastUserTurn(),
+                    featurizer=LabelFeaturizerViaLookup(attribute=INTENT),
+                    indexer=IndexerFromLabelExtractor(),
+                ),
+            ),
+            (
+                ENTITIES,
+                LabelFeaturizationPipeline(
+                    extractor=ExtractEntitiesAndTextFromLastUserTurn(),
+                    featurizer=ApplyEntityTagsEncoder(bilou_tagging=bilou_tagging),
+                    indexer=None,  # this won't work
+                ),
+            ),
+        ]
+        self._feat_training = FeaturizedDatasetFromTurns(
+            initial_validations=filters,
+            ignore_duplicates=self.remove_duplicates,
+            modifiers=modifiers,
+            final_validations=filters,
+            turn_featurizer=turn_featurizer,
+            label_handling=label_handling,
+        )
+
+        self._feat_training.train(domain=domain, interpreter=interpreter)
 
     def featurize_trackers(
         self,
@@ -195,46 +273,41 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
 
         """
 
-        # TODO: in the previous version,  def _extract_examples( created lists
-        # that referenced the same states -- but modification was done to the list
-        # (only during inference)
-        # ... => switch back to copy when needed (i.e. when sequence modifiers modify
-        # single turns)
+        # FIXME: was is this done here *and* public - if so, why?
+        self.prepare_for_featurization(
+            domain=domain, interpreter=interpreter, bilou_tagging=bilou_tagging
+        )
 
         trackers_as_states = []
-        trackers_as_labels = None
+        trackers_as_labels = []
         trackers_as_entities = []
 
-        # for tracker in trackers:
+        # TODO: do we need this flexibility?
+        self._ignore_action_unlikely.switched_on = ignore_action_unlikely_intent
 
-        #     stateful_turns = StatefulTurn.parse(
-        #         tracker=tracker,
-        #         domain=domain,
-        #         omit_unset_slots=False,
-        #         ignore_rule_only_turns=False,
-        #         rule_only_data=False,
-        #     )
+        for tracker in trackers:
 
-        #     # preprocessing
-        #     postprocessing = [
-        #         RemoveTurnsWithPrevActionUnlikelyIntent() if ignore_action_unlikely_intent else None,
-        #     ]
+            stateful_turns = StatefulTurn.parse(
+                tracker=tracker,
+                domain=domain,
+                omit_unset_slots=False,
+                ignore_rule_only_turns=False,
+                rule_only_data=False,
+            )
 
-        #     DatasetFromTurns(
-        #         initial_filters =
-        #     )
+            (
+                featurized_turns,
+                featurized_labels,
+                indexed_labels,
+            ) = self._feat_training.generate(
+                turns=stateful_turns, interpreter=interpreter, training=True
+            )
 
-        #     modified_turns = TurnSequenceModifier.apply_all(preprocessing, stateful_turns)
+            trackers_as_states.append(featurized_turns)
+            trackers_as_labels.append(indexed_labels[ACTION_NAME])
+            trackers_as_entities.append(featurized_labels[ENTITIES])
 
-        #     # extract
-        #     subsequencer = DatasetFromTurns(
-        #         ignore_duplicates=self.remove_duplicates,
-        #         filters=[EndsWithBotTurn(), HasMinLength(2)],
-        #         postprocessing=[KeepMaxHistory(self.max_history)],
-        #     )
-        #     extractions = [
-        #         ExtractActionFromLastTurn(),
-        #     ]
+        return trackers_as_states, np.array(trackers_as_labels), trackers_as_entities
 
     def create_state_features(
         self,
@@ -281,33 +354,24 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
         used by rule-policies during inference
 
         """
+
+        # TODO: is this really needed? - these should be fixed per policy
+        self._ignore_action_unlikely.switched_on = ignore_action_unlikely_intent
+        self._last_turn_handling.keep_text = use_text_for_last_user_input
+
         trackers_as_states = []
         for tracker in trackers:
-
-            # TODO : replace this with dataset from turns and generate in prediction mode
 
             stateful_turns = StatefulTurn.parse(
                 tracker=tracker,
                 domain=domain,
                 omit_unset_slots=False,
                 ignore_rule_only_turns=ignore_rule_only_turns,
-                rule_only_data=rule_only_data,
+                rule_only_data=False,
             )
 
-            pipeline = [
-                RemoveTurnsWithPrevActionUnlikelyIntent()
-                if ignore_action_unlikely_intent
-                else None,
-                DuringPredictionIfLastTurnWasUserTurnKeepEitherTextOrNonText(
-                    keep_text=use_text_for_last_user_input,
-                ),
-                RemoveUserTextIfIntentFromEveryTurn(),
-                KeepMaxHistory(self.max_history),
-            ]
-            pipeline = [item for item in pipeline if item]
-
-            modified_turns = TurnSequenceModifier.apply_all(
-                pipeline, stateful_turns, training=False
+            modified_turns, _ = next(
+                self._raw_inference.generate(stateful_turns, training=False)
             )
 
             trackers_as_states.append([turn.state for turn in modified_turns])

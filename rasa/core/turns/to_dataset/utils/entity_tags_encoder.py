@@ -1,7 +1,7 @@
 from rasa.shared.core.domain import Domain
-from typing import Any, List, Optional, Dict, Text, Text
+from typing import Any, List, Optional, Dict, Text
 
-from rasa.core.turns.utils.multihot_encoder import MultiHotEncoder
+from rasa.core.turns.to_dataset.utils.multihot_encoder import MultiHotEncoder
 from rasa.nlu.constants import TOKENS_NAMES
 from rasa.nlu.extractors.extractor import EntityTagSpec
 from rasa.nlu.tokenizers.tokenizer import Token
@@ -21,8 +21,6 @@ from rasa.utils.tensorflow import model_data_utils
 
 class EntityTagsEncoder:
     def __init__(self, domain: Domain, bilou_tagging: bool = False) -> None:
-        """
-        """
         multihot_encoder = MultiHotEncoder(domain.entity_states)
 
         if bilou_tagging:

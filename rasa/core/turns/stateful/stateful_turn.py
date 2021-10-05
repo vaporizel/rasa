@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import List, Optional, Dict, Text, Any
 
-from rasa.core.turns.turn import Actor, DefinedTurn, Turn
+from rasa.core.turns.turn import Actor, DefinedTurn
 from rasa.shared.core.domain import Domain, State
 from rasa.shared.core.events import ActionExecuted, Event, UserUttered
 from rasa.shared.core.trackers import DialogueStateTracker
