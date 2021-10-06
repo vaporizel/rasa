@@ -49,7 +49,7 @@ class ExtractAttributeFromLastUserTurn(
         self, turns: List[StatefulTurn], training: bool = True,
     ) -> Tuple[List[Turn], Tuple[Optional[Text], Optional[T]]]:
         last_user_turn_idx = Turn.get_index_of_last_user_turn(turns)
-        if training:
+        if training and last_user_turn_idx is not None:
             last_user_turn = turns[last_user_turn_idx]
             state = last_user_turn.state.get(USER, {})
             raw_info = (
@@ -84,8 +84,6 @@ class ExtractIntentFromLastUserTurn(LabelFromTurnsExtractor[StatefulTurn, Text])
         self, turns: List[StatefulTurn], training: bool = True,
     ) -> Tuple[List[Turn], Tuple[Optional[Text], T]]:
         turns, (_, intent) = self.extractor(turns, training=training)
-        if training and intent is None:
-            raise RuntimeError("Could not extract an intent...")
         return turns, intent
 
     def from_domain(self, domain: Domain,) -> List[Text]:
@@ -124,7 +122,7 @@ class ExtractEntitiesAndTextFromLastUserTurn(
     """
 
     def __init__(self) -> None:
-        self.extractor = ExtractAttributeFromLastUserTurn(attribute=INTENT)
+        self.extractor = ExtractAttributeFromLastUserTurn(attribute=ENTITIES)
 
     def __call__(
         self, turns: List[StatefulTurn], training: bool = True,

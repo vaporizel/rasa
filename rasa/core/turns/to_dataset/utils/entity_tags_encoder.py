@@ -63,10 +63,6 @@ class EntityTagsEncoder:
         if self.bilou_tagging:
             bilou_utils.apply_bilou_schema_to_message(dummy_message)
 
-        return {
-            ENTITY_TAGS: [
-                model_data_utils.get_tag_ids(
-                    dummy_message, self.entity_tag_spec, self.bilou_tagging
-                )
-            ]
-        }
+        return model_data_utils.get_tag_ids(
+            dummy_message, self.entity_tag_spec, self.bilou_tagging
+        )

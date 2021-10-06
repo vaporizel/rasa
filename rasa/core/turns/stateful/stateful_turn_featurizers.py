@@ -116,9 +116,9 @@ class BasicStatefulTurnFeaturizer(TurnFeaturizer[StatefulTurn]):
             if ACTION_NAME not in features:
                 action_name = sub_state.get(ACTION_NAME, None)
                 if action_name:
-                    features[ACTION_NAME] = self._multihot_encoding_for_action_name(
-                        action_name=action_name
-                    )
+                    features[ACTION_NAME] = [
+                        self._multihot_encoding_for_action_name(action_name=action_name)
+                    ]
 
         # Remember that the user state might be empty despite the turn belonging to
         # the user because of the edge case where a turn just captures an action listen.
@@ -128,15 +128,6 @@ class BasicStatefulTurnFeaturizer(TurnFeaturizer[StatefulTurn]):
 
             # Only featurize attributes != entities via the featurizers pipeline
             not_featurized_via_interpreter = {ENTITIES}
-
-            # # We do not featurize the "text" if an intent is present
-            # # FIXME: this is a replacement for  the
-            # #  self._remove_user_text_if_intent(trackers_as_states)
-            # # step  - that is only happenign in prediction_states functions
-            # # TODO: move this to modifiers and give modifiers flags for
-            # training/prediction
-            # if INTENT in sub_state:
-            #     not_featurized_via_interpreter.add(TEXT)
 
             # Create some features via the interpreter
             features_via_interpreter = FeatureLookup.lookup_features(
@@ -148,9 +139,9 @@ class BasicStatefulTurnFeaturizer(TurnFeaturizer[StatefulTurn]):
 
             # Use a simple multihot encoding for entities
             if ENTITIES in sub_state:
-                features[ENTITIES] = self._multihot_encoding_for_entities(
-                    sub_state.get(ENTITIES)
-                )
+                features[ENTITIES] = [
+                    self._multihot_encoding_for_entities(sub_state.get(ENTITIES))
+                ]
 
             # The only featurizer that could featurize this attribute is the
             # CountVectorizer, which will create sparse sequence and sentence
@@ -163,17 +154,21 @@ class BasicStatefulTurnFeaturizer(TurnFeaturizer[StatefulTurn]):
             if INTENT not in features:
                 intent = sub_state.get(INTENT, None)
                 if intent:
-                    features[INTENT] = self._multihot_encoding_for_intent(intent)
+                    features[INTENT] = [self._multihot_encoding_for_intent(intent)]
 
         # We always featurize the context, i.e. slots and loop information.
         if SLOTS in state:
-            features[SLOTS] = self._multihot_encoding_for_slots_as_features(
-                slots_as_features=state[SLOTS]
-            )
+            features[SLOTS] = [
+                self._multihot_encoding_for_slots_as_features(
+                    slots_as_features=state[SLOTS]
+                )
+            ]
         if ACTIVE_LOOP in state:
-            features[ACTIVE_LOOP] = self._multihot_encoding_for_active_loop(
-                active_loop_name=state[ACTIVE_LOOP]["name"]
-            )
+            features[ACTIVE_LOOP] = [
+                self._multihot_encoding_for_active_loop(
+                    active_loop_name=state[ACTIVE_LOOP]["name"]
+                )
+            ]
         return features
 
     def _multihot_encoding_for_intent(self, intent: Text) -> Features:

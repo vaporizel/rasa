@@ -19,7 +19,10 @@ class MultiHotEncoder:
         if len(set(dimension_names)) != len(dimension_names):
             raise ValueError("Expected the dimension names to be unique.")
         self.dimension_name_to_index: Dict[Text, int] = {
-            name: idx for idx, name in enumerate(sorted(dimension_names))
+            name: idx
+            for idx, name in enumerate(
+                dimension_names
+            )  # enumerate(sorted(dimension_names)) # FIXME: does sorting break tests?
         }
 
     def encode_as_sparse_sentence_feature(
@@ -29,12 +32,14 @@ class MultiHotEncoder:
         col = []
         data = []
         for dim_name, value in dimension_names_to_values.items():
-            index = self.dimension_name_to_index.get(dim_name)
-            if index:
+            index = self.dimension_name_to_index.get(dim_name, None)
+            if index is not None:
                 col.append(index)
                 data.append(value)
         row = [0] * len(data)
-        features = scipy.sparse.coo_matrix((data, (row, col)), shape=[1, dim])
+        features = scipy.sparse.coo_matrix(
+            (data, (row, col)), shape=[1, dim], dtype=float
+        )
         return Features(features, FEATURE_TYPE_SENTENCE, attribute, origin=origin,)
 
     def encode_as_index(self, dimension_name: Text,) -> int:

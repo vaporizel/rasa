@@ -13,7 +13,7 @@ from typing import (
     Optional,
 )
 from dataclasses import dataclass
-import copy
+import logging
 
 import numpy as np
 
@@ -23,10 +23,17 @@ from rasa.shared.core.domain import Domain
 from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
 from rasa.shared.nlu.training_data.features import Features
 
+logger = logging.getLogger(__name__)
 
 TurnType = TypeVar("TurnType")
 RawLabelType = TypeVar("RawLabelType")
 FeatureCollection = Dict[Text, List[Features]]
+
+
+def turns_to_str(turns: List[TurnType]) -> Text:
+    indent = " " * 2
+    turns = "\n".join(f"{indent}{idx:2}. {turn}" for idx, turn in enumerate(turns))
+    return f"[\n{turns}\n]"
 
 
 class TurnSubSequenceGenerator(Generic[TurnType], ABC):
@@ -34,21 +41,23 @@ class TurnSubSequenceGenerator(Generic[TurnType], ABC):
 
     def __init__(
         self,
-        initial_validations: Optional[List[TurnSequenceValidation[TurnType]]] = None,
-        ignore_duplicates: bool = False,
-        modifiers: Optional[List[TurnSequenceModifier[TurnType]]] = None,
-        final_validation: Optional[List[TurnSequenceValidation[TurnType]]] = None,
+        preprocessing: Optional[List[TurnSequenceModifier[TurnType]]],
+        filters: Optional[List[TurnSequenceValidation[TurnType]]],
+        ignore_duplicates: bool,
+        modifiers: Optional[List[TurnSequenceModifier[TurnType]]],
+        filter_results: bool,
     ) -> None:
         """
         Args:
             filters: only applied during training
             ...
         """
-        self._initial_validations = [f for f in initial_validations if f] or []
+        self._preprocessing = preprocessing or []
+        self._filters = filters or []
         self._ignore_duplicates = ignore_duplicates
         self._cache: Set[Tuple[int, ...]] = set()
-        self._modifiers = [p for p in modifiers if p] or []
-        self._final_validations = [f for f in final_validation if f] or []
+        self._modifiers = modifiers or []
+        self._filter_results = filter_results
 
     def generate_subsequence(
         self, turns: List[TurnType], training: bool, limit: Optional[int] = None,
@@ -68,8 +77,16 @@ class TurnSubSequenceGenerator(Generic[TurnType], ABC):
             training: Indicates whether we are in training mode.
 
         """
-        steps = [len(turns)] if not training else range(1, len(turns))
+        steps = [len(turns) + 1] if not training else range(1, len(turns) + 1)
         num_generated = 0
+
+        logger.debug(f"Generate subsequences from:\n{turns_to_str(turns)}")
+
+        preprocessed_turns = TurnSequenceModifier.modify_all(
+            self._preprocessing, turns, inplace=True,
+        )
+
+        logger.debug(f"Applied preprocessing:\n{turns_to_str(turns)}")
 
         for idx in steps:
 
@@ -77,57 +94,109 @@ class TurnSubSequenceGenerator(Generic[TurnType], ABC):
                 return
 
             # we'll make a copy of this subsequence, once we know we continue with it
-            next_sequence = turns[:idx]
+            subsequence = preprocessed_turns[:idx]
+
+            logger.debug(
+                f"Attempt to generate from subsequence:\n{turns_to_str(subsequence)}"
+            )
 
             # during training - skip if it does not pass filters
-            if training and (
-                not all(_filter(next_sequence) for _filter in self._initial_validations)
+            if training and not TurnSequenceValidation.apply_all(
+                self._filters, subsequence
             ):
+                logger.debug(f"Failed (did not pass filters {self._filters})")
                 continue
 
             # during training - skip if it is a duplicate
             if training and self._ignore_duplicates:
-                id = tuple(hash(turn) for turn in next_sequence)
+                id = tuple(hash(turn) for turn in subsequence)
                 if id in self._cache:
+                    logger.debug(f"Failed (duplicate of other subsequence)")
                     continue
                 else:
                     self._cache.add(id)
 
-            # make a deep copy to allow all modifiers and extractors to work in-place
-            next_sequence = copy.deepcopy(next_sequence)
-
             # always apply postprocessing
+            subsequence = TurnSequenceModifier.apply_all(
+                self._modifiers, subsequence, training=training,
+            )
+
             if self._modifiers:
-                next_sequence = TurnSequenceModifier.apply_all(
-                    self._modifiers, next_sequence, training=training,
-                )
+                logger.debug(f"Modified subsequence:\n{turns_to_str(subsequence)}")
 
             # check if filters still pass (we modified the sequence)
-            if training and (
-                not all(_filter(next_sequence) for _filter in self._final_validations)
+            if training and not TurnSequenceValidation.apply_all(
+                self._filters, subsequence
             ):
+                logger.debug(f"Failed (did not pass filters {self._filters})")
                 continue
 
             num_generated += 1
-            yield next_sequence
+            yield subsequence
 
 
+@dataclass
 class TurnSequenceValidation(Generic[TurnType]):
-    """Filters a given list of turns."""
+    """Determines whether or not a given list of turns satisfies some criteria."""
 
     def __call__(self, turns: List[TurnType]) -> bool:
         pass
 
+    @classmethod
+    def apply_all(
+        self, validations: List[TurnSequenceValidation[TurnType]], turns: List[TurnType]
+    ) -> bool:
+        return all(validation(turns) for validation in validations)
 
+
+@dataclass
 class TurnSequenceModifier(Generic[TurnType], ABC):
     """Returns a modified list of turns.
 
     Must not modify the given list of turns.
     """
 
+    on_training: bool = True
+    on_inference: bool = True
+
     @abstractmethod
-    def __call__(self, turns: List[TurnType], training: bool) -> List[TurnType]:
+    def modify(self, turns: List[TurnType], inplace: bool) -> List[TurnType]:
+        """Returns a modified turn sequence.
+
+        Args:
+            turns: a list of turns
+            inplace: if this is set to `True` then the single turns of the given
+               sequence of turns may be modified inplace; otherwise the given turns
+               must not be modified but the returned turn sequence may contain new
+               turn objects
+        Returns:
+            a modified turn sequence
+        """
         pass
+
+    def modify_all(
+        modifiers: List[TurnSequenceModifier[TurnType]],
+        turns: List[TurnType],
+        inplace: bool,
+    ) -> List[TurnType]:
+        for modifier in modifiers:
+            turns = modifier.modify(turns, inplace=inplace)
+        return turns
+
+    def apply(self, turns: List[TurnType], training: bool) -> List[TurnType]:
+        """Modifies turns inplace during inference, and not-inplace during training.
+
+        During inference, our datasets only generate one sequence from the turn
+        sequence extracted from a tracker. During training, we generate several
+        sub-sequences from the same turn sequence (extracted from the same tracker).
+        Hence, inplace modifications could only have undesired side-effects during
+        training.
+        """
+        if training and self.on_training:
+            return self.modify(turns, inplace=True)
+        if not training and self.on_inference:
+            return self.modify(turns, inplace=False)
+        return turns
 
     @staticmethod
     def apply_all(
@@ -136,7 +205,7 @@ class TurnSequenceModifier(Generic[TurnType], ABC):
         training: bool,
     ) -> List[TurnType]:
         for modifier in modifiers:
-            turns = modifier(turns, training=training)
+            turns = modifier.apply(turns, training=training)
         return turns
 
 
@@ -146,20 +215,18 @@ class DatasetFromTurns(TurnSubSequenceGenerator[TurnType], Generic[TurnType]):
     def __init__(
         self,
         label_extractors: Dict[Text, LabelFromTurnsExtractor[TurnType, Any]],
-        initial_validations: Optional[
-            List[Optional[TurnSequenceValidation[TurnType]]]
-        ] = None,
+        preprocessing: Optional[List[Optional[TurnSequenceModifier[TurnType]]]] = None,
+        filters: Optional[List[Optional[TurnSequenceValidation[TurnType]]]] = None,
         ignore_duplicates: bool = False,
         modifiers: Optional[List[Optional[TurnSequenceModifier[TurnType]]]] = None,
-        final_validations: Optional[
-            List[Optional[TurnSequenceValidation[TurnType]]]
-        ] = None,
+        filter_results: bool = False,
     ):
         super().__init__(
-            initial_validations=initial_validations,
+            preprocessing=preprocessing,
+            filters=filters,
             ignore_duplicates=ignore_duplicates,
             modifiers=modifiers,
-            final_validation=final_validations,
+            filter_results=filter_results,
         )
         self._label_extractors = label_extractors
 
@@ -170,6 +237,7 @@ class DatasetFromTurns(TurnSubSequenceGenerator[TurnType], Generic[TurnType]):
             processed_turns, outputs = LabelFromTurnsExtractor.apply_all(
                 self._label_extractors, turns=processed_turns, training=training,
             )
+            logger.debug(f"Extracted labels:\n{turns_to_str(processed_turns)}")
             yield processed_turns, outputs
 
 
@@ -178,32 +246,29 @@ class FeaturizedDatasetFromTurns(
 ):
     """Generates and encodes labeled and modified subsequences of turns."""
 
-    # FIXME: if we run predict on training data for evaluation, then we'll leak
-    # information
+    # TODO: add __len__ implementation that skips the featurization
 
     def __init__(
         self,
         turn_featurizer: TurnFeaturizer[TurnType],
         label_handling: List[Tuple[Text, LabelFeaturizationPipeline[TurnType, Any]]],
-        initial_validations: Optional[
-            List[Optional[TurnSequenceValidation[TurnType]]]
-        ] = None,
+        preprocessing: Optional[List[Optional[TurnSequenceModifier[TurnType]]]] = None,
+        filters: Optional[List[Optional[TurnSequenceValidation[TurnType]]]] = None,
         ignore_duplicates: bool = False,
         modifiers: Optional[List[Optional[TurnSequenceModifier[TurnType]]]] = None,
-        final_validations: Optional[
-            List[Optional[TurnSequenceValidation[TurnType]]]
-        ] = None,
+        filter_results: bool = False,
     ):
         super().__init__(
-            initial_validations=initial_validations,
+            preprocessing=preprocessing,
+            filters=filters,
             ignore_duplicates=ignore_duplicates,
             modifiers=modifiers,
-            final_validation=final_validations,
+            filter_results=filter_results,
         )
         self._turn_featurizer = turn_featurizer
         self._label_handling = label_handling
 
-    def train(
+    def train_featurizers_and_indexers(
         self, domain: Domain, interpreter: Optional[NaturalLanguageInterpreter]
     ) -> None:
         self._turn_featurizer.train(domain=domain, interpreter=interpreter)
@@ -223,30 +288,28 @@ class FeaturizedDatasetFromTurns(
         Tuple[List[FeatureCollection], FeatureCollection, Dict[Text, np.ndarray]]
     ]:
         self.raise_if_not_trained()
-        for processed_turns in self.generate_subsequence(turns, training=training):
+        for subsequence in self.generate_subsequence(turns, training=training):
 
-            # extract and featurize labels
-            # Note that we run the output extraction when `training==False` as well
-            # because the extractors will take care of removing all labels from the
-            # training data.
+            processed_turns = subsequence
+
+            # extract and featurize labels during training
             collected_features = {}
             collected_indices = {}
             if training:
+
                 for label_name, label_handling in self._label_handling:
                     processed_turns, next_features, next_indices = label_handling(
                         processed_turns, training=training, interpreter=interpreter
-                    )
-                    if next_features:
-                        collected_features[label_name] = next_features
-                    if next_indices:
-                        collected_indices[label_name] = next_indices
+                    )  # TODO: return raw labels as well for debugging
+                    collected_features[label_name] = next_features
+                    collected_indices[label_name] = next_indices
+                logger.debug(f"Extracted labels:\n{turns_to_str(processed_turns)}")
 
-            # featurize the remaining input
+            # featurize the (remaining) input (during training)
             processed_turns_featurized = [
                 self._turn_featurizer.featurize(turn, interpreter=interpreter)
                 for turn in processed_turns
             ]
-
             yield processed_turns_featurized, collected_features, collected_indices
 
 
@@ -269,9 +332,11 @@ class LabelFeaturizationPipeline(Generic[TurnType, RawLabelType]):
         indices = np.array([])
         if training:
             if self.featurizer:
-                features = self.featurizer(extracted_label, interpreter=interpreter)
+                features = self.featurizer.featurize(
+                    extracted_label, interpreter=interpreter
+                )
             if self.indexer and extracted_label:
-                indices = self.indexer(extracted_label)
+                indices = self.indexer.index(extracted_label)
         return turns, features, indices
 
 
@@ -323,30 +388,50 @@ class TurnFeaturizer(Generic[TurnType], Trainable, ABC):
 
 
 class LabelFeaturizer(Generic[RawLabelType], Trainable):
-    """Featurizes a label."""
+    """Converts a label to `Features`."""
+
+    def featurize(
+        self, raw_label: RawLabelType, interpreter: NaturalLanguageInterpreter
+    ) -> List[Features]:
+        self.raise_if_not_trained()
+        return self._featurize(raw_label=raw_label, interpreter=interpreter)
 
     @abstractmethod
-    def __call__(
+    def _featurize(
         self, raw_label: RawLabelType, interpreter: NaturalLanguageInterpreter
     ) -> List[Features]:
         pass
 
-    @abstractmethod
     def train(
         self, domain: Domain, interpreter: Optional[NaturalLanguageInterpreter]
     ) -> None:
+        self._train(domain=domain, interpreter=interpreter)
+        self._trained = True
+
+    @abstractmethod
+    def _train(self, domain: Domain, interpreter: Optional[NaturalLanguageInterpreter]):
         pass
 
 
 class LabelIndexer(Generic[TurnType, RawLabelType], Trainable):
     """Converts a label to an index."""
 
-    @abstractmethod
-    def __call__(self, raw_label: Optional[RawLabelType],) -> np.ndarray:
-        pass
+    def index(self, raw_label: Optional[RawLabelType],) -> np.ndarray:
+        self.raise_if_not_trained()
+        return self._index(raw_label=raw_label)
 
     @abstractmethod
+    def _index(self, raw_label: Optional[RawLabelType]) -> np.ndarray:
+        pass
+
     def train(
+        self, domain: Domain, extractor: LabelFromTurnsExtractor[TurnType, RawLabelType]
+    ) -> None:
+        self._train(domain=domain, extractor=extractor)
+        self._trained = True
+
+    @abstractmethod
+    def _train(
         self, domain: Domain, extractor: LabelFromTurnsExtractor[TurnType, RawLabelType]
     ) -> None:
         pass

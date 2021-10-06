@@ -37,7 +37,7 @@ class Turn:
         self.events = events
 
     def __repr__(self) -> Text:
-        return f"{Turn.__name__}({self.actor}):{self.events}"
+        return f"{self.__class__.__name__}({self.actor}):{self.events}"
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Turn):

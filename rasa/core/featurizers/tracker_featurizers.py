@@ -10,22 +10,19 @@ from rasa.core.turns.stateful.stateful_turn_featurizers import (
 from rasa.core.turns.stateful.stateful_turn_labels import (
     ExtractActionFromLastTurn,
     ExtractEntitiesAndTextFromLastUserTurn,
-    ExtractIntentFromLastUserTurn,
 )
 from rasa.core.turns.stateful.stateful_turn_handling import (
+    IfLastTurnWasUserTurnKeepEitherTextOrNonText,
     RemoveTurnsWithPrevActionUnlikelyIntent,
     RemoveUserTextIfIntentFromEveryTurn,
-    DuringPredictionIfLastTurnWasUserTurnKeepEitherTextOrNonText,
 )
-from rasa.core.turns.to_dataset.basic_encoders import (
+from rasa.core.turns.to_dataset.basic_label_encoders import (
     ApplyEntityTagsEncoder,
     IndexerFromLabelExtractor,
-    LabelFeaturizerViaLookup,
 )
 from rasa.core.turns.to_dataset.basic_turn_handling import (
+    EndsWithPredictableActionExecuted,
     KeepMaxHistory,
-    HasMinLength,
-    EndsWithBotTurn,
 )
 from rasa.core.featurizers.single_state_featurizer import SingleStateFeaturizer
 from rasa.core.turns.to_dataset.dataset import (
@@ -36,7 +33,7 @@ from rasa.core.turns.to_dataset.dataset import (
 from rasa.shared.core.domain import State, Domain
 from rasa.shared.core.trackers import DialogueStateTracker
 from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
-from rasa.shared.nlu.constants import ACTION_NAME, INTENT, ENTITIES
+from rasa.shared.nlu.constants import ACTION_NAME, ENTITY_TAGS, INTENT, ENTITIES
 from rasa.shared.exceptions import RasaException
 from rasa.shared.nlu.training_data.features import Features
 
@@ -169,29 +166,24 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
 
         # (2.2) un-featurized dataset generators - for prediction
 
-        self._ignore_action_unlikely = RemoveTurnsWithPrevActionUnlikelyIntent()
-        filters = [EndsWithBotTurn(), HasMinLength(2)]
-        self._last_turn_handling = (
-            DuringPredictionIfLastTurnWasUserTurnKeepEitherTextOrNonText()
-        )
-
+        will_be_set_later = True  # i.e. Reminder for an ugly workaround
         modifiers = [
-            self._ignore_action_unlikely,
-            KeepMaxHistory(max_history),
-            self._last_turn_handling,
-            RemoveUserTextIfIntentFromEveryTurn(),
+            RemoveTurnsWithPrevActionUnlikelyIntent(switched_on=will_be_set_later),
+            KeepMaxHistory(max_history=max_history),
+            IfLastTurnWasUserTurnKeepEitherTextOrNonText(
+                on_training=False, keep_text=will_be_set_later
+            ),
+            RemoveUserTextIfIntentFromEveryTurn(on_training=False),
         ]
+        self._ignore_action_unlikely = modifiers[0]
+        self._last_turn_handling = modifiers[-2]
+
         label_extractors = []
-        # label_extractors = [
-        #     (INTENT, ExtractIntentFromLastUserTurn()),
-        #     (ENTITIES, ExtractEntitiesFromLastUserTurn()),
-        #     (ACTION_NAME, ExtractActionFromLastTurn()),
-        # ]
+
         self._raw_inference = DatasetFromTurns(
-            initial_validations=filters,
+            filters=None,
             ignore_duplicates=remove_duplicates,
             modifiers=modifiers,
-            final_validations=filters,
             label_extractors=label_extractors,
         )
 
@@ -210,14 +202,19 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
 
         # (1.1) featurized dataset generators - for training
 
-        self._ignore_action_unlikely = RemoveTurnsWithPrevActionUnlikelyIntent()
-        filters = [EndsWithBotTurn(), HasMinLength(2)]
+        filters = [EndsWithPredictableActionExecuted()]  # FIXME
 
+        preprocessing = [RemoveUserTextIfIntentFromEveryTurn()]
+
+        will_be_set_later = True  # ugly workaround - is this flexibility needed?
         modifiers = [
-            self._ignore_action_unlikely,
-            KeepMaxHistory(self.max_history),
+            RemoveTurnsWithPrevActionUnlikelyIntent(switched_on=will_be_set_later),
+            KeepMaxHistory(max_history=self.max_history, offset_for_training=+1),
         ]
+        self._ignore_action_unlikely = modifiers[0]
+
         turn_featurizer = BasicStatefulTurnFeaturizer()
+
         label_handling = [
             (
                 ACTION_NAME,
@@ -227,16 +224,16 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
                     indexer=IndexerFromLabelExtractor(),
                 ),
             ),
+            # (
+            #     INTENT,
+            #     LabelFeaturizationPipeline(
+            #         extractor=ExtractIntentFromLastUserTurn(),
+            #         featurizer=LabelFeaturizerViaLookup(attribute=INTENT),
+            #         indexer=IndexerFromLabelExtractor(),
+            #     ),
+            # ),
             (
-                INTENT,
-                LabelFeaturizationPipeline(
-                    extractor=ExtractIntentFromLastUserTurn(),
-                    featurizer=LabelFeaturizerViaLookup(attribute=INTENT),
-                    indexer=IndexerFromLabelExtractor(),
-                ),
-            ),
-            (
-                ENTITIES,
+                ENTITY_TAGS,
                 LabelFeaturizationPipeline(
                     extractor=ExtractEntitiesAndTextFromLastUserTurn(),
                     featurizer=ApplyEntityTagsEncoder(bilou_tagging=bilou_tagging),
@@ -245,15 +242,17 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
             ),
         ]
         self._feat_training = FeaturizedDatasetFromTurns(
-            initial_validations=filters,
+            preprocessing=preprocessing,
+            filters=filters,
             ignore_duplicates=self.remove_duplicates,
             modifiers=modifiers,
-            final_validations=filters,
             turn_featurizer=turn_featurizer,
             label_handling=label_handling,
         )
 
-        self._feat_training.train(domain=domain, interpreter=interpreter)
+        self._feat_training.train_featurizers_and_indexers(
+            domain=domain, interpreter=interpreter
+        )
 
     def featurize_trackers(
         self,
@@ -291,21 +290,17 @@ class MaxHistoryTrackerFeaturizer(TrackerFeaturizer):
                 tracker=tracker,
                 domain=domain,
                 omit_unset_slots=False,
-                ignore_rule_only_turns=False,
-                rule_only_data=False,
+                ignore_rule_only_turns=False,  # no need to during training..
+                rule_only_data=False,  # no need to during training..
             )
 
-            (
-                featurized_turns,
-                featurized_labels,
-                indexed_labels,
-            ) = self._feat_training.generate(
+            for inputs, label_features, label_indices in self._feat_training.generate(
                 turns=stateful_turns, interpreter=interpreter, training=True
-            )
+            ):
 
-            trackers_as_states.append(featurized_turns)
-            trackers_as_labels.append(indexed_labels[ACTION_NAME])
-            trackers_as_entities.append(featurized_labels[ENTITIES])
+                trackers_as_states.append(inputs)
+                trackers_as_labels.append(label_indices[ACTION_NAME])
+                trackers_as_entities.append(label_features[ENTITY_TAGS])
 
         return trackers_as_states, np.array(trackers_as_labels), trackers_as_entities
 
