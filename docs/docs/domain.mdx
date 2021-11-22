@@ -580,7 +580,7 @@ a specific form, see [Mapping Conditions](./domain.mdx#mapping-conditions).
 #### from_text
 
 The `from_text` mapping will use the text of the last user utterance to fill the slot
-`slot_name`. If `intent_name` is `None`, the slot will be filled regardless of intent name.
+`slot_name`. If `intent_name` is `None` (do not set `intent: None`, just dont use `intent:`), the slot will be filled regardless of intent name.
 Otherwise, the slot will only be filled if the user's intent is `intent_name`.
 
 The slot mapping will not apply if the intent of the message is `excluded_intent`.
